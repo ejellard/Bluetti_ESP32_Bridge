@@ -105,8 +105,11 @@ static device_field_data_t bluetti_device_state[] = {
 
 static device_field_data_t bluetti_device_command[] = {
   /*Page 0x00 Core */
-  {AC_OUTPUT_ON,      0x0B, 0xBF, 1, 0, 0, BOOL_FIELD}, 
-  {DC_OUTPUT_ON,      0x0B, 0xC0, 1, 0, 0, BOOL_FIELD}
+  {AC_OUTPUT_ON,      0x0B, 0xBF, 1, 0, 0, BOOL_FIELD},
+  {DC_OUTPUT_ON,      0x0B, 0xC0, 1, 0, 0, BOOL_FIELD},
+  // UPS / charge mode. Verified on AC240: 1=Custom, 2=PV Priority,
+  // 3=Standard UPS, 4=Time Control. Write register == read register (0x0B/0xB9).
+  {UPS_MODE,          0x0B, 0xB9, 1, 0, 0, UINT_FIELD}
 };
 
 static device_field_data_t bluetti_polling_command[] = {
@@ -114,6 +117,9 @@ static device_field_data_t bluetti_polling_command[] = {
   {FIELD_UNDEFINED, 0x00, 0x46, 0x15 ,0 , 0, TYPE_UNDEFINED},
  // {FIELD_UNDEFINED, 0x0B, 0xB9, 0x3D ,0 , 0, TYPE_UNDEFINED}
 
+  // Phase 1 (verification): poll a small range covering UPS_MODE (0xB9) and
+  // GRID_CHARGE_ON (0xC3) so state/ups_mode publishes. Read-only / safe.
+  {FIELD_UNDEFINED, 0x0B, 0xB9, 0x0B ,0 , 0, TYPE_UNDEFINED},
   {FIELD_UNDEFINED, 0x0B, 0xDA, 0x01 ,0 , 0, TYPE_UNDEFINED},
   {FIELD_UNDEFINED, 0x0B, 0xF5, 0x07 ,0 , 0, TYPE_UNDEFINED},
   //Pack Polling

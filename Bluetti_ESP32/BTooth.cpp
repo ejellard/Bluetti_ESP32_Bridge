@@ -55,7 +55,14 @@ class BluettiAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
 
      ESPBluettiSettings settings = get_esp32_bluetti_settings();
     // We have found a device, let us now see if it contains the service we are looking for.
-    if (advertisedDevice->haveServiceUUID() && advertisedDevice->isAdvertisingService(serviceUUID) && (strcmp(advertisedDevice->getName().c_str(),settings.bluetti_device_id)==0) ) {
+#ifdef BLUETTI_MAC
+    // match by BLE address (case-insensitive) when a MAC is hardcoded in config.h
+    bool deviceMatch = (strcasecmp(advertisedDevice->getAddress().toString().c_str(), BLUETTI_MAC) == 0);
+#else
+    // default: match by advertised name (the configured bluetti_device_id)
+    bool deviceMatch = (strcmp(advertisedDevice->getName().c_str(), settings.bluetti_device_id) == 0);
+#endif
+    if (advertisedDevice->haveServiceUUID() && advertisedDevice->isAdvertisingService(serviceUUID) && deviceMatch ) {
       BLEDevice::getScan()->stop();
       bluettiDevice = advertisedDevice;
       doConnect = true;

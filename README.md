@@ -121,6 +121,7 @@ Commands are subscribed from
 * /bluetti/<your_device_id>/command
   * ac_output_on
   * dc_output_on
+  * ups_mode (AC300/AC240: `custom`/`pv_priority`/`standard`/`time_control`, or raw `1`-`4`)
 
 #### State
 States are published to
@@ -136,6 +137,8 @@ States are published to
   * arm_version
   * power_generation
   * total_battery_percent
+  * ups_mode (1=Custom, 2=PV Priority, 3=Standard UPS, 4=Time Control)
+  * grid_charge_on (1=on, 0=off)
 
 ## Display
 Config Display:

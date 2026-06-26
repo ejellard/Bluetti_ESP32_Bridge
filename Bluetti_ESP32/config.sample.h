@@ -17,6 +17,19 @@
 #define DEVICE_NAME "BLUETTI-MQTT"
 #define BLUETTI_TYPE AC300
 
+// --- Hardcoded connection settings (optional) -------------------------------
+// When WIFI_SSID is defined the captive-portal is skipped and the ESP32
+// connects directly (falls back to the portal if the join fails).
+// When BLUETTI_MAC is defined the BLE device is matched by address instead of
+// by advertised name. BLUETTI_DEVICE_ID sets the MQTT topic prefix.
+// Leave these commented out to use the WiFiManager portal / EEPROM.
+//#define WIFI_SSID         "your-ssid"
+//#define WIFI_PASSWORD     "your-password"
+//#define BLUETTI_MAC       "C0:5D:89:88:36:AE"
+//#define BLUETTI_DEVICE_ID "AC2402442000088948"
+//#define MQTT_SERVER       "192.168.1.10"
+//#define MQTT_PORT         "1883"
+
 #define BLUETOOTH_QUERY_MESSAGE_DELAY 3000
 
 #define RELAISMODE 1

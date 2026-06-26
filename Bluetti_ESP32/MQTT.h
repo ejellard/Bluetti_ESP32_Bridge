@@ -4,6 +4,10 @@
 #include "DeviceType.h"
 
 extern void publishTopic(enum field_names field_name, String value);
+// Queue a field/value from the BLE task; actually published later on the main loop.
+extern void enqueuePublish(enum field_names field_name, String value);
+// Drain a few queued publishes (call from the main loop only).
+extern void handlePublishQueue();
 extern void publishHAConfig();
 extern void publishDeviceState();
 extern void publishDeviceStateStatus();

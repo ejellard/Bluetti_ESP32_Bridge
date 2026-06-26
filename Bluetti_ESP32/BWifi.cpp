@@ -86,6 +86,17 @@ void initBWifi(bool resetWifi){
     wifiManager.setConfigPortalTimeout(300);
   }
 
+  // Apply any hardcoded overrides from config.h (take precedence over EEPROM)
+#ifdef BLUETTI_DEVICE_ID
+  strlcpy(wifiConfig.bluetti_device_id, BLUETTI_DEVICE_ID, sizeof(wifiConfig.bluetti_device_id));
+#endif
+#ifdef MQTT_SERVER
+  strlcpy(wifiConfig.mqtt_server, MQTT_SERVER, sizeof(wifiConfig.mqtt_server));
+#endif
+#ifdef MQTT_PORT
+  strlcpy(wifiConfig.mqtt_port, MQTT_PORT, sizeof(wifiConfig.mqtt_port));
+#endif
+
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
   wifiManager.addParameter(&custom_mqtt_server);
@@ -107,9 +118,26 @@ void initBWifi(bool resetWifi){
                         #endif
 	});
   
+#ifdef WIFI_SSID
+  Serial.println(F("[WiFi] Using hardcoded credentials from config.h"));
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long wifiAttemptStart = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - wifiAttemptStart) < 30000) {
+    delay(500);
+    Serial.print(".");
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("[WiFi] Hardcoded connect failed, falling back to config portal"));
+    if (!wifiManager.autoConnect("Bluetti_ESP32")) {
+      ESP.restart();
+    }
+  }
+#else
   if (!wifiManager.autoConnect("Bluetti_ESP32")) {
     ESP.restart();
   }
+#endif
 
   if (shouldSaveConfig) {
      strlcpy(wifiConfig.mqtt_server, custom_mqtt_server.getValue(), 40);

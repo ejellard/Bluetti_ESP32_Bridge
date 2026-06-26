@@ -9,8 +9,37 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-WiFiClient mqttClient;  
+WiFiClient mqttClient;
 PubSubClient client(mqttClient);
+
+// PubSubClient is NOT thread-safe, but it is touched from several FreeRTOS
+// tasks: the main loop (client.loop / reconnect), the NimBLE notify task
+// (publishTopic while parsing BT data) and the AsyncWebServer task
+// (isMQTTconnected). Without serialisation the shared buffer/TCP stream gets
+// corrupted -> publish errors -> forced reconnects -> dropped subscriptions.
+// A recursive mutex guards every client.* call.
+SemaphoreHandle_t mqttMutex = NULL;
+static inline bool mqttLock(TickType_t wait){
+  return (mqttMutex == NULL) ? true : (xSemaphoreTakeRecursive(mqttMutex, wait) == pdTRUE);
+}
+static inline void mqttUnlock(){
+  if (mqttMutex) xSemaphoreGiveRecursive(mqttMutex);
+}
+
+// Publishing is decoupled from the BLE notify task: parse_bluetooth_data only
+// enqueues (field,value) pairs here, and the main loop drains them at a
+// controlled rate via handlePublishQueue(). This stops the BLE task from
+// flooding the TCP socket with a whole page of fields back-to-back (which
+// overran the send buffer -> publish errors -> self-inflicted reconnects).
+typedef struct {
+  enum field_names f_name;
+  char value[40];
+} mqtt_publish_t;
+QueueHandle_t mqttPublishQueue = NULL;
+// How many queued items to publish per main-loop pass. Keeps client.loop()
+// running between batches so the socket can drain and keepalive stays healthy.
+#define MQTT_PUBLISH_BUDGET_PER_LOOP 4
+
 int publishErrorCount = 0;
 unsigned long lastMQTTMessage = 0;
 unsigned long previousDeviceStatePublish = 0;
@@ -278,6 +307,23 @@ String map_command_value(String command_name, String value){
     }
   }
 
+  //UPS / charge mode. Verified on AC240 (see Device_AC300.h).
+  //Accepts friendly names or the raw number (1-4).
+  if(command_name == "UPS_MODE"){
+    if (value == "CUSTOM" || value == "CUSTOMIZED") {
+      toRet = "1";
+    }
+    if (value == "PV_PRIORITY" || value == "PV") {
+      toRet = "2";
+    }
+    if (value == "STANDARD" || value == "STANDARD_UPS" || value == "UPS") {
+      toRet = "3";
+    }
+    if (value == "TIME_CONTROL" || value == "TIME") {
+      toRet = "4";
+    }
+  }
+
 
   return toRet;
 }
@@ -325,7 +371,9 @@ void subscribeTopic(enum field_names field_name) {
   ESPBluettiSettings settings = get_esp32_bluetti_settings();
 
   sprintf(subscribeTopicBuf, "bluetti/%s/command/%s", settings.bluetti_device_id, map_field_name(field_name).c_str() );
+  mqttLock(portMAX_DELAY);
   client.subscribe(subscribeTopicBuf);
+  mqttUnlock();
   lastMQTTMessage = millis();
 
 }
@@ -355,8 +403,17 @@ void publishTopic(enum field_names field_name, String value){
       Serial.println("[MQTT] No MQTT server specified!");
     #endif
   }else{
+    // Called from the NimBLE notify task: don't block it indefinitely. If the
+    // lock can't be taken quickly (e.g. a reconnect is in progress) skip this
+    // field - it will be republished on the next poll cycle.
+    if (!mqttLock(pdMS_TO_TICKS(250))){
+      publishErrorCount++;
+      return;
+    }
     lastMQTTMessage = millis();
-    if (!client.publish(publishTopicBuf, value.c_str() )){
+    bool published = client.publish(publishTopicBuf, value.c_str() );
+    mqttUnlock();
+    if (!published){
       publishErrorCount++;
       #ifdef DEBUG
         Serial.println("[MQTT] Publish error: " + String(lastMQTTMessage) + ": publish ERROR! " + map_field_name(field_name) + " -> " + value);
@@ -374,6 +431,32 @@ void publishTopic(enum field_names field_name, String value){
  
 }
 
+// Called from the NimBLE notify task. Never touches the MQTT client - just
+// drops the value on a queue (non-blocking; if full the value is skipped and
+// will be refreshed on the next poll).
+void enqueuePublish(enum field_names field_name, String value){
+  if (mqttPublishQueue == NULL) return;
+  mqtt_publish_t item;
+  item.f_name = field_name;
+  strlcpy(item.value, value.c_str(), sizeof(item.value));
+  xQueueSend(mqttPublishQueue, &item, 0);
+}
+
+// Called from the main loop only. Publishes a bounded number of queued items so
+// client.loop() keeps running between batches and the socket can drain.
+void handlePublishQueue(){
+  if (mqttPublishQueue == NULL) return;
+  mqtt_publish_t item;
+  bool connected = isMQTTconnected();
+  int budget = MQTT_PUBLISH_BUDGET_PER_LOOP;
+  while (budget-- > 0 && xQueueReceive(mqttPublishQueue, &item, 0)){
+    // if we're not connected, just drain/discard - fresh values arrive each poll
+    if (connected){
+      publishTopic(item.f_name, String(item.value));
+    }
+  }
+}
+
 void publishDeviceState(){
   char publishTopicBuf[1024];
 
@@ -383,7 +466,10 @@ void publishDeviceState(){
   #ifdef DEBUG
     Serial.println("[MQTT] PublishingDeviceState: "+value);
   #endif
-  if (!client.publish(publishTopicBuf, value.c_str() )){
+  mqttLock(portMAX_DELAY);
+  bool published = client.publish(publishTopicBuf, value.c_str() );
+  mqttUnlock();
+  if (!published){
     publishErrorCount++;
   }
   lastMQTTMessage = millis();
@@ -400,7 +486,10 @@ void publishDeviceStateStatus(){
   #ifdef DEBUG
     Serial.println("[MQTT] PublishingDeviceStateStatus: "+value);
   #endif
-  if (!client.publish(publishTopicBuf, value.c_str() )){
+  mqttLock(portMAX_DELAY);
+  bool published = client.publish(publishTopicBuf, value.c_str() );
+  mqttUnlock();
+  if (!published){
     publishErrorCount++;
   }
   lastMQTTMessage = millis();
@@ -417,27 +506,44 @@ void initMQTT(){
       Serial.println("[MQTT] No MQTT server configured");
       return;
     }
+
+    // create the access mutex + publish queue once, before any client.* call
+    // or BLE notify can run
+    if (mqttMutex == NULL){
+      mqttMutex = xSemaphoreCreateRecursiveMutex();
+    }
+    if (mqttPublishQueue == NULL){
+      mqttPublishQueue = xQueueCreate(48, sizeof(mqtt_publish_t));
+    }
+
     Serial.print("[MQTT] Connecting to MQTT at: ");
     Serial.print(settings.mqtt_server);
     Serial.print(":");
     Serial.println(F(settings.mqtt_port));
-    
+
     client.setServer(settings.mqtt_server, atoi(settings.mqtt_port));
     client.setCallback(callback);
+    // headroom + steadier connection (defaults are 256 byte buffer / 15s keepalive)
+    client.setBufferSize(1024);
+    client.setKeepAlive(30);
+    client.setSocketTimeout(10);
 
     bool connect_result;
-    const char connect_id[] = "Bluetti_ESP32";
+    // Use the (unique) device id as the MQTT client id so the broker can't kick
+    // the session as a duplicate of another "Bluetti_ESP32" client.
+    const char* connect_id = (strlen(settings.bluetti_device_id) > 0) ? settings.bluetti_device_id : "Bluetti_ESP32";
+    mqttLock(portMAX_DELAY);
     if (settings.mqtt_username) {
         connect_result = client.connect(connect_id, settings.mqtt_username, settings.mqtt_password);
     } else {
         connect_result = client.connect(connect_id);
     }
-    
+
     if (connect_result) {
-        
+
       Serial.println(F("[MQTT] Connected to MQTT Server... "));
 
-      // subscribe to topics for commands
+      // subscribe to topics for commands (subscribeTopic re-takes the recursive lock)
       for (int i=0; i< sizeof(bluetti_device_command)/sizeof(device_field_data_t); i++){
         subscribeTopic(bluetti_device_command[i].f_name);
       }
@@ -445,9 +551,10 @@ void initMQTT(){
       publishDeviceState();
       publishDeviceStateStatus();
     }
+    mqttUnlock();
 
-    
-      
+
+
 };
 
 void handleMQTT(){
@@ -466,7 +573,9 @@ void handleMQTT(){
     if ((millis() - previousDeviceStateStatusPublish) > (DEVICE_STATE_STATUS_UPDATE * 60000)){ 
       publishDeviceStateStatus();
     }
-    if (!isMQTTconnected() && publishErrorCount > 5){
+    // Reconnect whenever we're not connected (throttled). Note: publishes are
+    // skipped while disconnected, so we can't rely on publishErrorCount climbing.
+    if (!isMQTTconnected()){
       if ((millis() - previousMqttReconnect) > 5000)
       {
         previousMqttReconnect = millis();
@@ -474,7 +583,9 @@ void handleMQTT(){
         #ifdef DISPLAYSSD1306
             disp_setMqttStatus(false);
         #endif
+        mqttLock(portMAX_DELAY);
         client.disconnect();
+        mqttUnlock();
         lastMQTTMessage=0;
         previousDeviceStatePublish=0;
         previousDeviceStateStatusPublish=0;
@@ -483,18 +594,21 @@ void handleMQTT(){
         initMQTT();
       }
     }
-    
+
+    mqttLock(portMAX_DELAY);
     client.loop();
+    mqttUnlock();
+
+    // publish a small batch of queued BT values (decoupled from the BLE task)
+    handlePublishQueue();
 }
 
 bool isMQTTconnected(){
-    if (client.connected()){
-      return true;
-    }
-    else
-    {
-      return false;
-    }  
+    // can be called from the AsyncWebServer task, so guard client access
+    mqttLock(portMAX_DELAY);
+    bool connectedNow = client.connected();
+    mqttUnlock();
+    return connectedNow;
 }
 
 int getPublishErrorCount(){

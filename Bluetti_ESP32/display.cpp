@@ -1,9 +1,16 @@
+#include "config.h"
+
+// The whole display implementation is only compiled when the OLED is enabled
+// (#define DISPLAYSSD1306 in config.h). This avoids needing the Adafruit
+// GFX/SSD1306 libraries at all when the display is disabled. All call sites of
+// these functions elsewhere are likewise guarded by #ifdef DISPLAYSSD1306.
+#ifdef DISPLAYSSD1306
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "display.h"
-#include "config.h"
 
 // used for millis loops
 const unsigned long flProgressBar = 200; // speed of update progressbar
@@ -535,3 +542,5 @@ void drawProgressbar(int x,int y, int width,int height, int progress)
    display.fillRect(x, y, bar , height, WHITE);
    display.display();
 }
+
+#endif // DISPLAYSSD1306
